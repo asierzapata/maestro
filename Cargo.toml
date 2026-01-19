@@ -16,6 +16,7 @@ dirs = "5.0"
 alacritty_terminal = "0.25"
 mio = { version = "1.0", features = ["os-poll", "os-ext"] }
 nix = { version = "0.29", features = ["term", "process", "ioctl", "signal", "fs"] }
+crossbeam-channel = "0.5"
 vte = "0.15"
 
 # Force core-text 21.0.0 which uses core-graphics 0.24 (matches zed-font-kit)

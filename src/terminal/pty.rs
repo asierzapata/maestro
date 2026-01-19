@@ -170,6 +170,13 @@ impl PtyProcess {
             Err(_) => false, // Error checking status
         }
     }
+
+    /// Returns the raw file descriptor for the PTY master.
+    ///
+    /// This is used by the event loop for polling.
+    pub fn master_fd(&self) -> RawFd {
+        self.master_fd
+    }
 }
 
 impl Drop for PtyProcess {

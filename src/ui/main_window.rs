@@ -1,7 +1,10 @@
 use crate::git::{Worktree, get_repository_name, list_worktrees, worktree};
+use crate::terminal::TerminalSession;
+use crate::ui::terminal_view::TerminalView;
 use crate::ui::theme::Theme;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Main application window that orchestrates the sidebar and feature view
@@ -17,6 +20,10 @@ pub struct MainWindow {
     dialog_branch_name: SharedString,
     dialog_error: Option<SharedString>,
     focus_handle: FocusHandle,
+    // Terminal session management
+    terminal_sessions: HashMap<PathBuf, Entity<TerminalSession>>,
+    active_terminal_view: Option<Entity<TerminalView>>,
+    terminal_error: Option<String>,
 }
 
 impl MainWindow {
@@ -54,6 +61,9 @@ impl MainWindow {
             dialog_branch_name: "".into(),
             dialog_error: None,
             focus_handle: cx.focus_handle(),
+            terminal_sessions: HashMap::new(),
+            active_terminal_view: None,
+            terminal_error: None,
         })
     }
 
@@ -76,6 +86,9 @@ impl MainWindow {
             dialog_branch_name: "".into(),
             dialog_error: None,
             focus_handle: cx.focus_handle(),
+            terminal_sessions: HashMap::new(),
+            active_terminal_view: None,
+            terminal_error: None,
         }
     }
 
@@ -84,15 +97,88 @@ impl MainWindow {
         self.worktrees.get(self.selected_worktree_index)
     }
 
+    /// Get or create a terminal session for the given worktree path
+    fn get_or_create_terminal_session(
+        &mut self,
+        worktree_path: &PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Result<Entity<TerminalSession>, String> {
+        // Check if session already exists
+        if let Some(session) = self.terminal_sessions.get(worktree_path) {
+            return Ok(session.clone());
+        }
+
+        // Create new terminal session
+        let path = worktree_path.clone();
+        match TerminalSession::new(path.clone(), None, 24, 80) {
+            Ok(session) => {
+                let entity = cx.new(|_cx| session);
+                self.terminal_sessions.insert(path, entity.clone());
+                Ok(entity)
+            }
+            Err(e) => Err(format!("Failed to create terminal session: {}", e)),
+        }
+    }
+
+    /// Create or switch to the terminal view for the given worktree
+    fn switch_terminal_for_worktree(&mut self, worktree_path: &PathBuf, cx: &mut Context<Self>) {
+        // Clear any previous error
+        self.terminal_error = None;
+
+        // Get or create the terminal session
+        match self.get_or_create_terminal_session(worktree_path, cx) {
+            Ok(session_entity) => {
+                // Create a new terminal view with the session
+                let terminal_view = cx.new(|cx| {
+                    // Get the session from the entity
+                    let _session = session_entity.read(cx);
+                    // Create a new session for the view (we need to create a new one since TerminalSession doesn't implement Clone)
+                    match TerminalSession::new(worktree_path.clone(), None, 24, 80) {
+                        Ok(new_session) => TerminalView::new(new_session, cx),
+                        Err(_) => {
+                            // Fallback: create with temp dir
+                            let fallback_session =
+                                TerminalSession::new(std::env::temp_dir(), None, 24, 80)
+                                    .expect("Failed to create fallback terminal session");
+                            TerminalView::new(fallback_session, cx)
+                        }
+                    }
+                });
+                self.active_terminal_view = Some(terminal_view);
+            }
+            Err(e) => {
+                self.terminal_error = Some(e);
+                self.active_terminal_view = None;
+            }
+        }
+    }
+
     /// Handle worktree selection
     fn handle_worktree_click(&mut self, idx: usize, cx: &mut Context<Self>) {
         if idx < self.worktrees.len() {
+            // Save current session state before switching
+            if let Some(current_worktree) = self.selected_worktree() {
+                let current_path = current_worktree.path.clone();
+                if let Some(session_entity) = self.terminal_sessions.get(&current_path) {
+                    session_entity.update(cx, |session, _cx| {
+                        if let Err(e) = session.save_state() {
+                            eprintln!("Failed to save session state: {}", e);
+                        }
+                    });
+                }
+            }
+
             self.selected_worktree_index = idx;
+            let worktree_path = self.worktrees[idx].path.clone();
             println!(
                 "Selected worktree: {} (branch: {})",
-                self.worktrees[idx].path.display(),
+                worktree_path.display(),
                 self.worktrees[idx].branch
             );
+
+            // Switch to the terminal for this worktree
+            self.switch_terminal_for_worktree(&worktree_path, cx);
+
             cx.notify();
         }
     }
@@ -329,7 +415,7 @@ impl MainWindow {
     }
 
     /// Render inline creation input in the worktree list
-    fn render_inline_creation_input(&self, cx: &mut Context<Self>) -> Div {
+    fn render_inline_creation_input(&self, _cx: &mut Context<Self>) -> Div {
         div()
             .flex()
             .flex_col()
@@ -471,8 +557,46 @@ impl MainWindow {
             )
     }
 
-    /// Render the content area (placeholder for now)
-    fn render_content(&self) -> Div {
+    /// Render the content area with terminal or placeholder
+    fn render_content(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+        // If there's a terminal error, show error message
+        if let Some(error) = &self.terminal_error {
+            return div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .bg(self.theme.bg_primary)
+                .items_center()
+                .justify_center()
+                .gap_4()
+                .child(
+                    div()
+                        .text_lg()
+                        .text_color(self.theme.text_primary)
+                        .child("Terminal Error"),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(hsla(0.0, 0.7, 0.6, 1.0))
+                        .px_8()
+                        .child(error.clone()),
+                )
+                .into_any_element();
+        }
+
+        // If we have an active terminal view, render it
+        if let Some(terminal_view) = &self.active_terminal_view {
+            return div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .bg(self.theme.bg_primary)
+                .child(terminal_view.clone())
+                .into_any_element();
+        }
+
+        // Default: show placeholder prompting user to select a worktree
         let selected_worktree = self.selected_worktree();
 
         div()
@@ -487,13 +611,13 @@ impl MainWindow {
                 div()
                     .text_lg()
                     .text_color(self.theme.text_primary)
-                    .child("Feature View"),
+                    .child("Terminal"),
             )
             .child(
                 div()
                     .text_sm()
                     .text_color(self.theme.text_secondary)
-                    .child("Selected worktree:"),
+                    .child("Select a worktree to open a terminal"),
             )
             .when_some(selected_worktree, |this, worktree| {
                 this.child(
@@ -561,6 +685,7 @@ impl MainWindow {
                         }),
                 )
             })
+            .into_any_element()
     }
 
     /// Render error state
@@ -602,7 +727,8 @@ impl Render for MainWindow {
                 .flex_row()
                 .size_full()
                 .bg(self.theme.bg_primary)
-                .child(self.render_error());
+                .child(self.render_error())
+                .into_any_element();
         }
 
         div()
@@ -613,7 +739,8 @@ impl Render for MainWindow {
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::handle_dialog_key))
             .child(self.render_sidebar(cx))
-            .child(self.render_content())
+            .child(self.render_content(cx))
+            .into_any_element()
     }
 }
 
